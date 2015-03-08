@@ -41,8 +41,13 @@
 #include <IOKit/storage/IODVDMedia.h>
 #endif
 
+#define PROGRESS_NONE    0
+// #define PROGRESS_DOTS   1
+#define PROGRESS_NUMERIC 2
+
 /* Options */
 static int    debug       = HB_DEBUG_ALL;
+static int    progress_md = PROGRESS_NUMERIC;
 static int    update      = 0;
 static int    dvdnav      = 1;
 static char * input       = NULL;
@@ -186,6 +191,9 @@ static int is_whole_media_service( io_service_t service );
 
 /* Only print the "Muxing..." message once */
 static int show_mux_warning = 1;
+/* Remember what encoding pass/scan title we are on */
+static int current_encoding_pass = 0;
+static int current_scan_title = 0;
 
 /****************************************************************************
  * hb_error_handler
@@ -657,23 +665,42 @@ static int HandleEvents( hb_handle_t * h )
 
 #define p s.param.scanning
         case HB_STATE_SCANNING:
-            /* Show what title is currently being scanned */
-            if (p.preview_cur)
+            if (progress_md == PROGRESS_NUMERIC)
             {
-                fprintf(stderr, "\rScanning title %d of %d, preview %d, %.2f %%",
-                        p.title_cur, p.title_count, p.preview_cur, 100 * p.progress);
+                /* Show what title is currently being scanned */
+                if (p.preview_cur)
+                {
+                    fprintf(stderr, "\rScanning title %d of %d, preview %d, %.2f %%",
+                            p.title_cur, p.title_count, p.preview_cur, 100 * p.progress);
+                }
+                else
+                {
+                    fprintf(stderr, "\rScanning title %d of %d, %.2f %%",
+                            p.title_cur, p.title_count, 100 * p.progress);
+                }
+                fflush(stderr);
             }
-            else
+            else if (progress_md == PROGRESS_NONE && current_scan_title != p.title_cur)
             {
-                fprintf(stderr, "\rScanning title %d of %d, %.2f %%",
-                        p.title_cur, p.title_count, 100 * p.progress);
+                if (p.preview_cur)
+                {
+                    fprintf(stderr, "Scanning title %d of %d, preview %d\n",
+                            p.title_cur, p.title_count, p.preview_cur);
+                }
+                else
+                {
+                    fprintf(stderr, "Scanning title %d of %d\n",
+                            p.title_cur, p.title_count);
+                }
+                fflush(stderr);
             }
-            fflush(stderr);
+            current_scan_title = p.title_cur;
             break;
 #undef p
 
         case HB_STATE_SCANDONE:
         {
+            current_scan_title = 0;
             hb_title_set_t * title_set;
             hb_title_t * title;
             hb_job_t   * job;
@@ -2823,35 +2850,55 @@ static int HandleEvents( hb_handle_t * h )
 
 #define p s.param.working
         case HB_STATE_SEARCHING:
-            fprintf( stdout, "\rEncoding: task %d of %d, Searching for start time, %.2f %%",
-                     p.pass, p.pass_count, 100.0 * p.progress );
-            if( p.seconds > -1 )
+            if (progress_md == PROGRESS_NUMERIC)
             {
-                fprintf( stdout, " (ETA %02dh%02dm%02ds)", 
-                         p.hours, p.minutes, p.seconds );
+                fprintf( stdout, "\rEncoding: task %d of %d, Searching for start time, %.2f %%",
+                         p.pass, p.pass_count, 100.0 * p.progress );
+                if( p.seconds > -1 )
+                {
+                    fprintf( stdout, " (ETA %02dh%02dm%02ds)", 
+                             p.hours, p.minutes, p.seconds );
+                }
+                fflush(stdout);
             }
-            fflush(stdout);
             break;
 
         case HB_STATE_WORKING:
-            fprintf( stdout, "\rEncoding: task %d of %d, %.2f %%",
-                     p.pass, p.pass_count, 100.0 * p.progress );
-            if( p.seconds > -1 )
+            if (progress_md == PROGRESS_NUMERIC)
             {
-                fprintf( stdout, " (%.2f fps, avg %.2f fps, ETA "
-                         "%02dh%02dm%02ds)", p.rate_cur, p.rate_avg,
-                         p.hours, p.minutes, p.seconds );
+                fprintf( stdout, "\rEncoding: task %d of %d, %.2f %%",
+                         p.pass, p.pass_count, 100.0 * p.progress );
+                if( p.seconds > -1 )
+                {
+                    fprintf( stdout, " (%.2f fps, avg %.2f fps, ETA "
+                             "%02dh%02dm%02ds)", p.rate_cur, p.rate_avg,
+                             p.hours, p.minutes, p.seconds );
+                }
+                fflush(stdout);
             }
-            fflush(stdout);
+            else if (progress_md == PROGRESS_NONE && current_encoding_pass != p.pass)
+            {
+                fprintf( stdout, "Encoding: task %d of %d\n",
+                         p.pass, p.pass_count);
+                fflush(stdout);
+            }
+            current_encoding_pass = p.pass;
             break;
 #undef p
 
 #define p s.param.muxing
         case HB_STATE_MUXING:
         {
-            if (show_mux_warning)
+            if (show_mux_warning && progress_md != PROGRESS_NONE)
             {
-                fprintf( stdout, "\rMuxing: this may take awhile..." );
+                if (progress_md != PROGRESS_NONE)
+                {
+                    fprintf( stdout, "\rMuxing: this may take awhile..." );
+                }
+                else
+                {
+                    fprintf( stdout, "Muxing: this may take awhile...\n" );
+                }
                 fflush(stdout);
                 show_mux_warning = 0;
             }
@@ -2861,6 +2908,7 @@ static int HandleEvents( hb_handle_t * h )
 
 #define p s.param.workdone
         case HB_STATE_WORKDONE:
+            current_encoding_pass = 0;
             /* Print error if any, then exit */
             switch( p.error )
             {
@@ -2924,6 +2972,8 @@ static void ShowHelp()
     "    -h, --help              Print help\n"
     "    -u, --update            Check for updates and exit\n"
     "    -v, --verbose <#>       Be verbose (optional argument: logging level)\n"
+    "        --progress <mode>   Progress reporting mode (none, numeric)\n"
+    "                            (default: numeric)\n"
     "    -Z. --preset <string>   Use a built-in preset. Capitalization matters, and\n"
     "                            if the preset name has spaces, surround it with\n"
     "                            double quotation marks\n"
@@ -3552,6 +3602,7 @@ static int ParseOptions( int argc, char ** argv )
     #define QSV_IMPLEMENTATION   297
     #define FILTER_NLMEANS       298
     #define FILTER_NLMEANS_TUNE  299
+    #define PROGRESS_MODE        300
 
     for( ;; )
     {
@@ -3560,6 +3611,7 @@ static int ParseOptions( int argc, char ** argv )
             { "help",        no_argument,       NULL,    'h' },
             { "update",      no_argument,       NULL,    'u' },
             { "verbose",     optional_argument, NULL,    'v' },
+            { "progress",    required_argument, NULL,    PROGRESS_MODE },
             { "no-dvdnav",   no_argument,       NULL,    DVDNAV },
             { "no-opencl",   no_argument,       NULL,    NO_OPENCL },
 
@@ -3710,6 +3762,29 @@ static int ParseOptions( int argc, char ** argv )
                 else
                 {
                     debug = 1;
+                }
+                break;
+            case PROGRESS_MODE:
+                if( optarg != NULL)
+                {
+                    if (!strcmp(optarg, "numeric"))
+                    {
+                        progress_md = PROGRESS_NUMERIC;
+                    }
+                    else if (!strcmp(optarg, "none"))
+                    {
+                        progress_md = PROGRESS_NONE;
+                    }
+                    else
+                    {
+                        fprintf( stderr, "progress: invalid mode specified (%s)\n",
+                                 optarg );
+                        return -1;
+                    }
+                }
+                else
+                {
+                    progress_md = PROGRESS_NUMERIC;
                 }
                 break;
             case 'Z':
